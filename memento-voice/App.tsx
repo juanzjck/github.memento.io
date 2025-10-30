@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { SafeAreaView, View, Text, Button, ActivityIndicator, StyleSheet, TouchableOpacity, Image } from 'react-native';
+import { SafeAreaView, View, Text, Button, ActivityIndicator, StyleSheet, TouchableOpacity, Modal } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Audio } from 'expo-av';
 import * as Haptics from 'expo-haptics';
@@ -8,6 +8,7 @@ import useRecordAudio from './features/sentimensRecognitions/useRecordAudio';
 import { toAnalysis } from './utils/formatter';
 
 import { useEmotionAnalysis } from './utils/useSetimentsDetectionByText';
+import ArCameraScreen, { IdentifyResult } from './features/ar/ArCameraScreen';
 
 const ROSTER = [
   { personId: '1', name: 'Sebastian', relationship: 'Your grandson, you love him' },
@@ -18,8 +19,6 @@ const NEGATIVE_LABELS = [
 ];
 const NEGATIVE_THRESHOLD = 0.6; 
 const COOLDOWN_MS = 15_000; 
-
-type IdentifyResult = { name: string; relationship: string; confidence: number } | null;
 
 export default function App() {
   // Camera permission hook (Expo SDK 54/55+)
@@ -90,7 +89,7 @@ export default function App() {
     recording,
   } = useRecordAudio();
 
-  const analysis = useMemo(()=> toAnalysis(sentiments), [sentiments]);
+  const analysis = useMemo(() => (sentiments ? toAnalysis(sentiments) : null), [sentiments]);
   const [ textAnalysis, setTextAnalysis] = useState<{ emotions: any; reactions: any; raw: any } | null>(null);
   const { analyzeText, loading: aiLoading, error: aiError } =
   useEmotionAnalysis();
@@ -136,6 +135,7 @@ export default function App() {
 
   const [personName, setPersonName] = useState<string>('');
   const [personRelationShip, setPersonRelationShip] = useState<string>('');
+  const [showArScreen, setShowArScreen] = useState(false);
   
   const handleWhoAreYou = async () => {
     setBusy(true);
@@ -221,55 +221,6 @@ export default function App() {
     return "I'm hearing some tough feelings. I'm here with you. Would you like some help or a quick breathing exercise?";
   }
 
-  const [photo, setPhoto] = useState<{ uri: string; width: number; height: number } | null>(null);
-  const [boxes, setBoxes] = useState<Box[]>([]);
-
-  const snapAndDetect = async () => {
-      if (!camRef.current || busy) return;
-      setBusy(true);
-      try {
-        const pic = await camRef.current.takePictureAsync({ base64: true, skipProcessing: true });
-        setPhoto({ uri: pic.uri, width: pic.width!, height: pic.height! });
-
-        // --- Google Cloud Vision REST (FACE_DETECTION) ---
-        // 1) Enable Vision API in GCP; 2) Create API key; 3) Keep it server-side in production.
-        const body = {
-          requests: [{
-            image: { content: pic.base64 },
-            features: [{ type: "FACE_DETECTION", maxResults: 5 }]
-          }]
-        };
-
-        const resp = await fetch(
-          "https://vision.googleapis.com/v1/images:annotate?key=AIzaSyCIImTFRfZXh972tK2wHZ3hogeyKEWYkhw",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          }
-        );
-        const json = await resp.json();
-        const anns = json?.responses?.[0]?.faceAnnotations ?? [];
-
-        // Convert bounding polys to simple boxes
-        // Vision gives vertices [{x,y},...] possibly missing x/y (treated as 0)
-        const bxs: Box[] = anns.map((f: any) => {
-          const v = f.fdBoundingPoly?.vertices ?? [];
-          const xs = v.map((p: any) => p.x ?? 0);
-          const ys = v.map((p: any) => p.y ?? 0);
-          const x = Math.min(...xs), y = Math.min(...ys);
-          const w = Math.max(...xs) - x, h = Math.max(...ys) - y;
-          return { x, y, w, h };
-        });
-        setBoxes(bxs);
-      } catch (e) {
-        console.warn("Face detect failed:", e);
-        setBoxes([]);
-      } finally {
-        setBusy(false);
-      }
-  };
-
   // 1) Hooks not ready yet? Show a spinner ONCE, don't request here.
   if (!camPerm || !micPerm) {
     return (
@@ -316,15 +267,31 @@ export default function App() {
 
   // 4) Both granted → render the app
   return (
-    <SafeAreaView style={styles.container}>
+    <>
+      <Modal visible={showArScreen} animationType="slide" presentationStyle="fullScreen">
+        <ArCameraScreen
+          onClose={() => setShowArScreen(false)}
+          identify={identify}
+        />
+      </Modal>
+      <SafeAreaView style={styles.container}>
      
       <View style={styles.header}>
         <Text style={styles.title}>Memento</Text>
-        <View style={styles.badge}><Text style={styles.badgeText}>{statusText}</Text></View>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            onPress={() => setShowArScreen(true)}
+            style={styles.arBtn}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.arBtnLabel}>AR mode</Text>
+          </TouchableOpacity>
+          <View style={styles.badge}><Text style={styles.badgeText}>{statusText}</Text></View>
+        </View>
       </View>
       <View style={styles.cameraWrap}>
         <View style={styles.cameraInner}>
-          <CameraView ref={camRef} style={{ flex: 1 }} type={'back'} />
+          <CameraView ref={camRef} style={{ flex: 1 }} facing="back" />
           {/* Framing corners overlay */}
           <View pointerEvents="none" style={styles.overlay}>
             <Corner style={{ top: 16, left: 16, transform: [{ rotate: '0deg' }] }} />
@@ -375,8 +342,7 @@ export default function App() {
           </Text>
       )}
       <View style={styles.footer}>
-       {
-       !recording && (
+        {!recording && (
           <TouchableOpacity
             activeOpacity={0.8}
             style={[styles.talkBtn, busy && { opacity: 0.6 }]}
@@ -385,10 +351,8 @@ export default function App() {
           >
             <Text style={styles.talkLabel}>{busy || loading ? 'Working…' : 'Speak'}</Text>
           </TouchableOpacity>
-        )
-       }
-       {
-        recording && 
+        )}
+        {recording && (
           <TouchableOpacity
             activeOpacity={0.8}
             style={[styles.talkBtn, busy && { opacity: 0.6 }]}
@@ -397,17 +361,26 @@ export default function App() {
           >
             <Text style={styles.talkLabel}>{busy ? 'Working…' : 'Stop record'}</Text>
           </TouchableOpacity>
-       }
+        )}
         <TouchableOpacity
-            activeOpacity={1}
-            
-            onPress={handleWhoAreYou}
-            disabled={busy}
-          >
-        <Text style={styles.hint}>Point the camera at a person.</Text>
+          activeOpacity={0.85}
+          style={[styles.identifyBtn, busy && { opacity: 0.7 }]}
+          onPress={handleWhoAreYou}
+          disabled={busy}
+        >
+          <Text style={styles.identifyLabel}>{busy ? 'Looking…' : 'Who is this?'}</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          style={styles.secondaryBtn}
+          onPress={() => setShowArScreen(true)}
+        >
+          <Text style={styles.secondaryLabel}>Open AR camera</Text>
+        </TouchableOpacity>
+        <Text style={styles.hint}>Point the camera at a person.</Text>
       </View> 
     </SafeAreaView>
+    </>
   );
 }
 
@@ -464,6 +437,15 @@ export default function App() {
       justifyContent: 'space-between',
     },
     title: { color: 'white', fontSize: 22, fontWeight: '700', letterSpacing: 0.5 },
+    headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    arBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: '#1E2B4D',
+    },
+    arBtnLabel: { color: '#B7C1D9', fontSize: 12, fontWeight: '600', letterSpacing: 0.5 },
     badge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
     badgeText: { fontSize: 12, fontWeight: '600', color: 'white' },
 
@@ -530,13 +512,30 @@ export default function App() {
     },
     talkLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
 
-    stopBtn: {
-      backgroundColor: '#ED3B58',
-      paddingVertical: 18,
+    identifyBtn: {
+      backgroundColor: '#1B2640',
       borderRadius: 999,
+      paddingVertical: 16,
       alignItems: 'center',
+      borderWidth: 1,
+      borderColor: '#24345C',
     },
-    stopLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
-
+    identifyLabel: {
+      color: '#E3EBFF',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    secondaryBtn: {
+      borderRadius: 999,
+      paddingVertical: 16,
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: '#2F3E66',
+    },
+    secondaryLabel: {
+      color: '#8CA3D6',
+      fontSize: 15,
+      fontWeight: '600',
+    },
     hint: { color: '#B7C1D9', textAlign: 'center' },
   });
