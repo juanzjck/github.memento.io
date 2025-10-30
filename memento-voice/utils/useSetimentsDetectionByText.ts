@@ -26,7 +26,7 @@ export function useEmotionAnalysis() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer YOUR_API_KEY_HERE`,
+          Authorization: `Bearer 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`,
         },
         body: JSON.stringify({
           model: 'gpt-4.1',
@@ -66,7 +66,7 @@ Make sure the output is valid JSON only — no explanations or markdown.`,
       setResult(resultObj);
       return resultObj;
     } catch (err: any) {
-      console.error('Emotion analysis error:', err);
+      console.error('Emotion analysis error:', err.message);
       setError(err.message || 'Unknown error');
       return null;
     } finally {

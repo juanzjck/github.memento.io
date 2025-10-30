@@ -1,34 +1,66 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { SafeAreaView, View, Text, Button, ActivityIndicator, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { SafeAreaView, View, Text, Button, ActivityIndicator, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Audio } from 'expo-av';
 import * as Haptics from 'expo-haptics';
 import * as Speech from 'expo-speech';
-import RecordScreen from './features/sentimensRecognitions/recordAudioSentiments';
 import useRecordAudio from './features/sentimensRecognitions/useRecordAudio';
 import { toAnalysis } from './utils/formatter';
-import { useOpenAIEmotions } from './utils/useOpenAIEmotions';
+
 import { useEmotionAnalysis } from './utils/useSetimentsDetectionByText';
-import { stopRecording } from './features/sentimensRecognitions/audio';
-import { delay } from 'react-native/types_generated/Libraries/Animated/AnimatedExports';
+
 const ROSTER = [
   { personId: '1', name: 'Sebastian', relationship: 'Your grandson, you love him' },
-/*   { personId: '2', name: 'Emilia', relationship: "sebastian's girlfriend" },
-  { personId: '3', name: 'JP Morgan', relationship: 'friend' }, */
 ];
 
+const NEGATIVE_LABELS = [
+  'negative', 'anger', 'angry', 'sad', 'sadness', 'fear', 'anxiety', 'worry', 'stress', 'frustrat', 'depress'
+];
+const NEGATIVE_THRESHOLD = 0.6; 
+const COOLDOWN_MS = 15_000; 
+
 type IdentifyResult = { name: string; relationship: string; confidence: number } | null;
-function speak(text: string) {
-  Speech.stop();
-  Speech.speak(text, { language: 'en-US', pitch: 1.0, rate: 0.98 });
-}
 
 export default function App() {
   // Camera permission hook (Expo SDK 54/55+)
   const [camPerm, requestCamPerm] = useCameraPermissions();
 
+  const [ready, setReady] = useState(false);
+  const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
 
- 
+  useEffect(() => {
+    (async () => {
+      // 1) Make sure iOS speaks even if the phone is on silent
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        staysActiveInBackground: false,
+      });
+
+      // 2) Pick a concrete voice if available (prefer en-US)
+      const voices = await Speech.getAvailableVoicesAsync();
+      // console.log('voices', voices);
+      const en = voices?.find(v => v.language?.startsWith('en-US')) 
+              || voices?.find(v => v.language?.startsWith('en'));
+      console.log('Selected TTS voice:', en);
+      setVoiceId(en?.identifier);
+      setReady(true);
+    })();
+  }, []);
+
+  const speak = (text: string=  'Hello! Text-to-speech is working now.') => {
+    Speech.stop(); // stop any previous utterance
+    Speech.speak(text, {
+      language: 'en-US',
+      voice: voiceId,           // force a real voice
+      pitch: 1.0,
+      rate: 0.98,               // try 0.9 if it sounds too fast
+      onDone: () => console.log('TTS done'),
+      onStopped: () => console.log('TTS stopped'),
+      onError: (e) => console.warn('TTS error', e),
+    });
+  };
+
   // Mic permission hook (expo-av 14+)
   const [micPerm, requestMicPerm] = Audio.usePermissions();
   const [busy, setBusy] = useState(false);
@@ -75,20 +107,26 @@ export default function App() {
     return [...analysis.sentiments].sort((a, b) => b.score - a.score)[0];
   }, [analysis]);
 
+
+  const scheduleSpeakIntro = async () => {
+    await new Promise((r) => setTimeout(r, 500));
+    speak("Hi, I'm Memento. Tap the button and say something to get started.");
+  }
+
   useEffect(() => {
     speak("Hi, I'm Memento. Tap the button and say something to get started.");
     (async () => {
       const mic = await Audio.requestPermissionsAsync();
+      console.log('Mic permission:', mic);
       setHasMicPerm(mic.status === 'granted');
     })();
+    scheduleSpeakIntro();
   }, []);
   
   async function identify(_photoUri: string): Promise<IdentifyResult> {
     // TODO: replace with a real call. For now, randomly pick a known person with a confidence.
-    await new Promise((r) => setTimeout(r, 600));
-    const pick = ROSTER[Math.floor(Math.random() * ROSTER.length)];
-    const confidence = 0.72 + Math.random() * 0.25; // 0.72–0.97
-    return { name: pick.name, relationship: pick.relationship, confidence };
+    await new Promise((r) => setTimeout(r, 200));
+    return { name: 'Sebastian', relationship: 'Your grandson', confidence: 0.95};
   }
 
 
@@ -96,8 +134,10 @@ export default function App() {
     await onStopAndUpload((text)=>onTextReady(text));
   };
 
+  const [personName, setPersonName] = useState<string>('');
+  const [personRelationShip, setPersonRelationShip] = useState<string>('');
   
-  const handleWhoAreYou = useCallback(async () => {
+  const handleWhoAreYou = async () => {
     setBusy(true);
     try {
       setStatus('listening');
@@ -111,31 +151,124 @@ export default function App() {
       const photo = await camRef.current.takePictureAsync({ quality: 0.5, base64: false, skipProcessing: true });
 
       setStatus('identifying');
-      const result = await identify(photo.uri);
+      const result = await identify('');
 
       setStatus('speaking');
       if (!result) {
-        speak("I'm not sure yet. Do you want to save this person?");
+  
       } else if (result.confidence > 0.9) {
+        setPersonName(result.name);
+        setPersonRelationShip(result.relationship);
         speak(`This is ${result.name}, your ${result.relationship}.`);
       } else if (result.confidence > 0.75) {
         speak(`I think this is ${result.name}, your ${result.relationship}.`);
-      } else {
-        speak("I'm not sure yet. Do you want to save this person?");
       }
 
       setStatus('cooldown');
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, 200));
+     
       setStatus('idle');
     } catch (e: any) {
       console.warn(e);
-      Alert.alert('Oops', e?.message ?? 'Something went wrong capturing/identifying.');
+
       setStatus('idle');
     } finally {
       setBusy(false);
     }
-  }, [ busy]);
+  };
 
+  const negativeCooldownRef = useRef<number>(0);
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      if (!ready || !dominant) return;
+
+      const label = (dominant.label || '').toLowerCase();
+      const score = dominant.score ?? 0;
+      const isNegative = NEGATIVE_LABELS.some(k => label.includes(k));
+
+      if (!isNegative || score < NEGATIVE_THRESHOLD) return;
+
+      const now = Date.now();
+      if (now - (negativeCooldownRef.current || 0) < COOLDOWN_MS) return;
+
+      const speaking = await Speech.isSpeakingAsync();
+      if (cancelled || speaking) return;
+
+      negativeCooldownRef.current = now;
+      try {
+        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      } catch {}
+
+      speak(supportiveMessageFor(label));
+    })();
+
+    return () => { cancelled = true; };
+  }, [dominant, ready, voiceId]);
+
+  function supportiveMessageFor(label: string) {
+    const k = (label || '').toLowerCase();
+    if (k.includes('anger') || k.includes('angry') || k.includes('frustrat')) {
+      return "I hear frustration in your voice. Let's slow down together. Would you like a short breathing exercise?";
+    }
+    if (k.includes('sad') || k.includes('depress')) {
+      return "I'm sorry you're feeling down. You're not alone—I'm here. Want to take a short break together?";
+    }
+    if (k.includes('fear') || k.includes('anxiety') || k.includes('worry') || k.includes('stress')) {
+      return "It sounds like you're feeling anxious. Try a deep breath with me: in for 4, hold 4, out for 6.";
+    }
+    return "I'm hearing some tough feelings. I'm here with you. Would you like some help or a quick breathing exercise?";
+  }
+
+  const [photo, setPhoto] = useState<{ uri: string; width: number; height: number } | null>(null);
+  const [boxes, setBoxes] = useState<Box[]>([]);
+
+  const snapAndDetect = async () => {
+      if (!camRef.current || busy) return;
+      setBusy(true);
+      try {
+        const pic = await camRef.current.takePictureAsync({ base64: true, skipProcessing: true });
+        setPhoto({ uri: pic.uri, width: pic.width!, height: pic.height! });
+
+        // --- Google Cloud Vision REST (FACE_DETECTION) ---
+        // 1) Enable Vision API in GCP; 2) Create API key; 3) Keep it server-side in production.
+        const body = {
+          requests: [{
+            image: { content: pic.base64 },
+            features: [{ type: "FACE_DETECTION", maxResults: 5 }]
+          }]
+        };
+
+        const resp = await fetch(
+          "https://vision.googleapis.com/v1/images:annotate?key=AIzaSyCIImTFRfZXh972tK2wHZ3hogeyKEWYkhw",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }
+        );
+        const json = await resp.json();
+        const anns = json?.responses?.[0]?.faceAnnotations ?? [];
+
+        // Convert bounding polys to simple boxes
+        // Vision gives vertices [{x,y},...] possibly missing x/y (treated as 0)
+        const bxs: Box[] = anns.map((f: any) => {
+          const v = f.fdBoundingPoly?.vertices ?? [];
+          const xs = v.map((p: any) => p.x ?? 0);
+          const ys = v.map((p: any) => p.y ?? 0);
+          const x = Math.min(...xs), y = Math.min(...ys);
+          const w = Math.max(...xs) - x, h = Math.max(...ys) - y;
+          return { x, y, w, h };
+        });
+        setBoxes(bxs);
+      } catch (e) {
+        console.warn("Face detect failed:", e);
+        setBoxes([]);
+      } finally {
+        setBusy(false);
+      }
+  };
 
   // 1) Hooks not ready yet? Show a spinner ONCE, don't request here.
   if (!camPerm || !micPerm) {
@@ -181,7 +314,6 @@ export default function App() {
     );
   }
 
-
   // 4) Both granted → render the app
   return (
     <SafeAreaView style={styles.container}>
@@ -192,13 +324,23 @@ export default function App() {
       </View>
       <View style={styles.cameraWrap}>
         <View style={styles.cameraInner}>
-          <CameraView ref={camRef} style={styles.camera} facing="back" />
+          <CameraView ref={camRef} style={{ flex: 1 }} type={'back'} />
           {/* Framing corners overlay */}
           <View pointerEvents="none" style={styles.overlay}>
             <Corner style={{ top: 16, left: 16, transform: [{ rotate: '0deg' }] }} />
             <Corner style={{ top: 16, right: 16, transform: [{ rotate: '90deg' }] }} />
             <Corner style={{ bottom: 16, left: 16, transform: [{ rotate: '-90deg' }] }} />
             <Corner style={{ bottom: 16, right: 16, transform: [{ rotate: '180deg' }] }} />
+          </View>
+         { '' !== personName && '' !== personRelationShip && <View pointerEvents="none" style={styles.overlay}>
+            <Corner style={{ color: 'yellow', top: 150, left: 150, transform: [{ rotate: '0deg' }] }} />
+            <Corner style={{ color: 'yellow', top: 150, right: 100, transform: [{ rotate: '90deg' }] }} />
+            <Corner style={{ color: 'yellow', bottom: 150, left: 150, transform: [{ rotate: '-90deg' }] }} />
+            <Corner style={{ color: 'yellow', bottom: 150, right: 100, transform: [{ rotate: '180deg' }] }} />
+          </View>}
+          <View pointerEvents="none" style={{...styles.overlay, ...{top:50, left: 60}}}>
+            {'' !== personName && <Text style={styles.cameraText}>{personName}</Text>}
+            {'' !== personRelationShip && <Text style={[styles.cameraText, { top: 290 }]}>{personRelationShip}</Text>}
           </View>
         </View>
       </View>
@@ -257,9 +399,9 @@ export default function App() {
           </TouchableOpacity>
        }
         <TouchableOpacity
-            activeOpacity={0.8}
-            style={[styles.talkBtn, busy && { opacity: 0.6 }]}
-            onPress={handleStopRecording}
+            activeOpacity={1}
+            
+            onPress={handleWhoAreYou}
             disabled={busy}
           >
         <Text style={styles.hint}>Point the camera at a person.</Text>
@@ -270,121 +412,131 @@ export default function App() {
 }
 
 
+  function emojiFor(label: string) {
+    if (!label) return '';
+    console.log('Mapping label to emoji:', label);
+    const k = label?.toLowerCase();
+    if (k.includes('joy') || k.includes('happy') || k.includes('calm') ||  k.includes('positive')) return '🙂';
+    if (k.includes('love')) return '🥰';
+    if (k.includes('surprise')) return '😮';
+    if (k.includes('anger') || k.includes('angry')) return '😠';
+    if (k.includes('fear') || k.includes('anxiety') ||  k.includes('negative')) return '😟';
+    if (k.includes('sad')) return '😢';
+    if (k.includes('confus')) return '😕';
+    return '🧠';
+  }
 
-function emojiFor(label: string) {
-  if (!label) return '';
-  console.log('Mapping label to emoji:', label);
-  const k = label?.toLowerCase();
-  if (k.includes('joy') || k.includes('happy') || k.includes('calm') ||  k.includes('positive')) return '🙂';
-  if (k.includes('love')) return '🥰';
-  if (k.includes('surprise')) return '😮';
-  if (k.includes('anger') || k.includes('angry')) return '😠';
-  if (k.includes('fear') || k.includes('anxiety') ||  k.includes('negative')) return '😟';
-  if (k.includes('sad')) return '😢';
-  if (k.includes('confus')) return '😕';
-  return '🧠';
-}
+  function hueFor(label: string) {
+    // Stable hue mapping by label
+    const h = Math.abs([...label].reduce((a, c) => a + c.charCodeAt(0), 0)) % 360;
+    return `hsl(${h} 70% 55%)`;
+  }
 
-function hueFor(label: string) {
-  // Stable hue mapping by label
-  const h = Math.abs([...label].reduce((a, c) => a + c.charCodeAt(0), 0)) % 360;
-  return `hsl(${h} 70% 55%)`;
-}
-
-function Bar({ label, value }: { label: string; value: number }) {
-  const pct = Math.max(0, Math.min(1, value));
-  return (
-    <View style={styles.barRow}>
-      <Text style={styles.barLabel} numberOfLines={1}>
-        {label}
-      </Text>
-      <View style={styles.barTrack}>
-        <View style={[styles.barFill, { width: `${pct * 100}%`, backgroundColor: hueFor(label) }]} />
+  function Bar({ label, value }: { label: string; value: number }) {
+    const pct = Math.max(0, Math.min(1, value));
+    return (
+      <View style={styles.barRow}>
+        <Text style={styles.barLabel} numberOfLines={1}>
+          {label}
+        </Text>
+        <View style={styles.barTrack}>
+          <View style={[styles.barFill, { width: `${pct * 100}%`, backgroundColor: hueFor(label) }]} />
+        </View>
+        <Text style={styles.barPct}>{Math.round(pct * 100)}%</Text>
       </View>
-      <Text style={styles.barPct}>{Math.round(pct * 100)}%</Text>
-    </View>
-  );
-}
+    );
+  }
 
-function Corner({ style }: { style?: any }) {
-  return <View style={[styles.corner, style]} />;
-}
+  function Corner({ style }: { style?: any }) {
+    return <View style={[styles.corner, style]} />;
+  }
 
-/* ---------- Styles ---------- */
+  /* ---------- Styles ---------- */
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0B1220' },
+  const styles = StyleSheet.create({
+    container: { flex: 1, backgroundColor: '#0B1220' },
 
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  title: { color: 'white', fontSize: 22, fontWeight: '700', letterSpacing: 0.5 },
-  badge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
-  badgeText: { fontSize: 12, fontWeight: '600' },
+    header: {
+      paddingHorizontal: 20,
+      paddingVertical: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    title: { color: 'white', fontSize: 22, fontWeight: '700', letterSpacing: 0.5 },
+    badge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
+    badgeText: { fontSize: 12, fontWeight: '600', color: 'white' },
 
-  cameraWrap: { flex: 1, marginHorizontal: 16, marginBottom: 12 },
-  cameraInner: { flex: 1, borderRadius: 16, overflow: 'hidden', backgroundColor: '#050A16' },
-  camera: { flex: 1 },
-  overlay: {
-    position: 'absolute',
-    inset: 0,
-    justifyContent: 'space-between',
-  },
+    cameraWrap: { flex: 1, marginHorizontal: 16, marginBottom: 12 },
+    cameraInner: { flex: 1, borderRadius: 16, overflow: 'hidden', backgroundColor: '#050A16' },
+    camera: { flex: 1 },
+    overlay: {
+      position: 'absolute',
+      inset: 0,
+      justifyContent: 'space-between',
+    },
 
-  corner: {
-    position: 'absolute',
-    width: 28,
-    height: 28,
-    borderTopWidth: 3,
-    borderLeftWidth: 3,
-    borderColor: '#FFFFFF55',
-  },
+    corner: {
+      position: 'absolute',
+      width: 28,
+      height: 28,
+      borderTopWidth: 3,
+      borderLeftWidth: 3,
+      borderColor: '#FFFFFF55',
+    },
 
-  panel: {
-    marginHorizontal: 16,
-    marginBottom: 8,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: '#0E1A33',
-    borderWidth: 1,
-    borderColor: '#1E2B4D',
-  },
+    panel: {
+      marginHorizontal: 16,
+      marginBottom: 8,
+      padding: 14,
+      borderRadius: 14,
+      backgroundColor: '#0E1A33',
+      borderWidth: 1,
+      borderColor: '#1E2B4D',
+    },
 
-  dominantRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 },
-  dominantEmoji: { fontSize: 26 },
-  dominantLabel: { color: 'white', fontSize: 16, fontWeight: '700' },
-  dominantConf: { color: '#A9B8DA', fontSize: 12, marginTop: 2 },
+    cameraText:  {
+      position: "absolute",
+      top: 250,
+      alignSelf: "center",
+      backgroundColor: "rgba(0,0,0,0.5)",
+      color: "white",
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 8,
+      fontSize: 16,
+    },
+    dominantRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 },
+    dominantEmoji: { fontSize: 26 },
+    dominantLabel: { color: 'white', fontSize: 16, fontWeight: '700' },
+    dominantConf: { color: '#A9B8DA', fontSize: 12, marginTop: 2 },
 
-  bars: { gap: 8 },
-  barRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  barLabel: { color: '#D7E1FF', width: 88, fontSize: 12 },
-  barTrack: { flex: 1, height: 10, backgroundColor: '#14254A', borderRadius: 999, overflow: 'hidden' },
-  barFill: { height: '100%', borderRadius: 999 },
+    bars: { gap: 8 },
+    barRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    barLabel: { color: '#D7E1FF', width: 88, fontSize: 12 },
+    barTrack: { flex: 1, height: 10, backgroundColor: '#14254A', borderRadius: 999, overflow: 'hidden' },
+    barFill: { height: '100%', borderRadius: 999 },
 
-  barPct: { color: '#9FB4FF', width: 44, textAlign: 'right', fontVariant: ['tabular-nums'] },
+    barPct: { color: '#9FB4FF', width: 44, textAlign: 'right', fontVariant: ['tabular-nums'] },
 
-  summary: { color: '#BFD0FF', marginTop: 10, fontSize: 12 },
+    summary: { color: '#BFD0FF', marginTop: 10, fontSize: 12 },
 
-  footer: { padding: 20, gap: 10 },
-  talkBtn: {
-    backgroundColor: '#3461FF',
-    paddingVertical: 18,
-    borderRadius: 999,
-    alignItems: 'center',
-  },
-  talkLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
+    footer: { padding: 20, gap: 10 },
+    talkBtn: {
+      backgroundColor: '#3461FF',
+      paddingVertical: 18,
+      borderRadius: 999,
+      alignItems: 'center',
+    },
+    talkLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
 
-  stopBtn: {
-    backgroundColor: '#ED3B58',
-    paddingVertical: 18,
-    borderRadius: 999,
-    alignItems: 'center',
-  },
-  stopLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
+    stopBtn: {
+      backgroundColor: '#ED3B58',
+      paddingVertical: 18,
+      borderRadius: 999,
+      alignItems: 'center',
+    },
+    stopLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
 
-  hint: { color: '#B7C1D9', textAlign: 'center' },
-});
+    hint: { color: '#B7C1D9', textAlign: 'center' },
+  });
