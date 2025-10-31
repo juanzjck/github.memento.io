@@ -1,0 +1,7 @@
+{
+  "name": "memento-vr-ar",
+  "version": "0.1.0",
+  "description": "WebXR prototype for Memento AR/VR explorations.",
+  "private": true,
+  "license": "MIT"
+}

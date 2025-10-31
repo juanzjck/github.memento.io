@@ -4,6 +4,9 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Audio } from 'expo-av';
 import * as Haptics from 'expo-haptics';
 import * as Speech from 'expo-speech';
+import * as ScreenOrientation from 'expo-screen-orientation';
+import { useKeepAwake } from 'expo-keep-awake';
+import { Gyroscope } from 'expo-sensors';
 import useRecordAudio from './features/sentimensRecognitions/useRecordAudio';
 import { toAnalysis } from './utils/formatter';
 
@@ -21,6 +24,7 @@ const NEGATIVE_THRESHOLD = 0.6;
 const COOLDOWN_MS = 15_000; 
 
 export default function App() {
+  useKeepAwake();
   // Camera permission hook (Expo SDK 54/55+)
   const [camPerm, requestCamPerm] = useCameraPermissions();
 
@@ -115,11 +119,24 @@ export default function App() {
   useEffect(() => {
     speak("Hi, I'm Memento. Tap the button and say something to get started.");
     (async () => {
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+      } catch (error) {
+        console.warn('Failed to lock orientation', error);
+      }
       const mic = await Audio.requestPermissionsAsync();
       console.log('Mic permission:', mic);
       setHasMicPerm(mic.status === 'granted');
     })();
+    Gyroscope.setUpdateInterval(150);
+    const gyroSub = Gyroscope.addListener(({ x, y, z }) => {
+      setTilt({ x, y, z });
+    });
     scheduleSpeakIntro();
+    return () => {
+      ScreenOrientation.unlockAsync().catch(() => {});
+      gyroSub.remove();
+    };
   }, []);
   
   async function identify(_photoUri: string): Promise<IdentifyResult> {
@@ -136,6 +153,17 @@ export default function App() {
   const [personName, setPersonName] = useState<string>('');
   const [personRelationShip, setPersonRelationShip] = useState<string>('');
   const [showArScreen, setShowArScreen] = useState(false);
+  const [tilt, setTilt] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
+  const alignmentHint = useMemo(() => {
+    const threshold = 0.18;
+    if (Math.abs(tilt.y) > Math.abs(tilt.x) && Math.abs(tilt.y) > threshold) {
+      return tilt.y > 0 ? 'Tilt Down Slightly' : 'Tilt Up Slightly';
+    }
+    if (Math.abs(tilt.x) > threshold) {
+      return tilt.x > 0 ? 'Tilt Left Slightly' : 'Tilt Right Slightly';
+    }
+    return 'Hold Steady';
+  }, [tilt]);
   
   const handleWhoAreYou = async () => {
     setBusy(true);
@@ -291,7 +319,7 @@ export default function App() {
       </View>
       <View style={styles.cameraWrap}>
         <View style={styles.cameraInner}>
-          <CameraView ref={camRef} style={{ flex: 1 }} facing="back" />
+          <CameraView ref={camRef} style={{ flex: 1 }} facing="front" />
           {/* Framing corners overlay */}
           <View pointerEvents="none" style={styles.overlay}>
             <Corner style={{ top: 16, left: 16, transform: [{ rotate: '0deg' }] }} />
@@ -305,9 +333,14 @@ export default function App() {
             <Corner style={{ color: 'yellow', bottom: 150, left: 150, transform: [{ rotate: '-90deg' }] }} />
             <Corner style={{ color: 'yellow', bottom: 150, right: 100, transform: [{ rotate: '180deg' }] }} />
           </View>}
-          <View pointerEvents="none" style={{...styles.overlay, ...{top:50, left: 60}}}>
+          <View pointerEvents="none" style={styles.infoOverlay}>
+            <View style={styles.crosshair}>
+              <View style={styles.crosshairLineVertical} />
+              <View style={styles.crosshairLineHorizontal} />
+            </View>
+            <Text style={styles.alignmentHint}>{alignmentHint}</Text>
             {'' !== personName && <Text style={styles.cameraText}>{personName}</Text>}
-            {'' !== personRelationShip && <Text style={[styles.cameraText, { top: 290 }]}>{personRelationShip}</Text>}
+            {'' !== personRelationShip && <Text style={styles.cameraTextSecondary}>{personRelationShip}</Text>}
           </View>
         </View>
       </View>
@@ -341,44 +374,7 @@ export default function App() {
             No speech detected. Try speaking closer to the mic.
           </Text>
       )}
-      <View style={styles.footer}>
-        {!recording && (
-          <TouchableOpacity
-            activeOpacity={0.8}
-            style={[styles.talkBtn, busy && { opacity: 0.6 }]}
-            onPress={onStart}
-            disabled={busy}
-          >
-            <Text style={styles.talkLabel}>{busy || loading ? 'Working…' : 'Speak'}</Text>
-          </TouchableOpacity>
-        )}
-        {recording && (
-          <TouchableOpacity
-            activeOpacity={0.8}
-            style={[styles.talkBtn, busy && { opacity: 0.6 }]}
-            onPress={handleStopRecording}
-            disabled={busy}
-          >
-            <Text style={styles.talkLabel}>{busy ? 'Working…' : 'Stop record'}</Text>
-          </TouchableOpacity>
-        )}
-        <TouchableOpacity
-          activeOpacity={0.85}
-          style={[styles.identifyBtn, busy && { opacity: 0.7 }]}
-          onPress={handleWhoAreYou}
-          disabled={busy}
-        >
-          <Text style={styles.identifyLabel}>{busy ? 'Looking…' : 'Who is this?'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          activeOpacity={0.9}
-          style={styles.secondaryBtn}
-          onPress={() => setShowArScreen(true)}
-        >
-          <Text style={styles.secondaryLabel}>Open AR camera</Text>
-        </TouchableOpacity>
-        <Text style={styles.hint}>Point the camera at a person.</Text>
-      </View> 
+      <View style={styles.footerSpacer} />
     </SafeAreaView>
     </>
   );
@@ -449,13 +445,50 @@ export default function App() {
     badge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
     badgeText: { fontSize: 12, fontWeight: '600', color: 'white' },
 
-    cameraWrap: { flex: 1, marginHorizontal: 16, marginBottom: 12 },
-    cameraInner: { flex: 1, borderRadius: 16, overflow: 'hidden', backgroundColor: '#050A16' },
+    cameraWrap: { flex: 1, marginHorizontal: 0, marginBottom: 0 },
+    cameraInner: { flex: 1, borderRadius: 0, overflow: 'hidden', backgroundColor: '#050A16' },
     camera: { flex: 1 },
     overlay: {
       position: 'absolute',
       inset: 0,
       justifyContent: 'space-between',
+    },
+    infoOverlay: {
+      position: 'absolute',
+      top: '30%',
+      left: 0,
+      right: 0,
+      alignItems: 'center',
+      gap: 18,
+    },
+    crosshair: {
+      width: 160,
+      height: 160,
+      borderRadius: 80,
+      borderWidth: 1,
+      borderColor: '#FFFFFF33',
+      justifyContent: 'center',
+      alignItems: 'center',
+      position: 'relative',
+    },
+    crosshairLineVertical: {
+      position: 'absolute',
+      width: 2,
+      height: '70%',
+      backgroundColor: '#FFFFFF55',
+    },
+    crosshairLineHorizontal: {
+      position: 'absolute',
+      height: 2,
+      width: '70%',
+      backgroundColor: '#FFFFFF55',
+    },
+    alignmentHint: {
+      color: '#D5E1FF',
+      fontSize: 18,
+      fontWeight: '600',
+      letterSpacing: 0.4,
+      textTransform: 'uppercase',
     },
 
     corner: {
@@ -478,15 +511,23 @@ export default function App() {
     },
 
     cameraText:  {
-      position: "absolute",
-      top: 250,
-      alignSelf: "center",
-      backgroundColor: "rgba(0,0,0,0.5)",
+      backgroundColor: "rgba(0,0,0,0.55)",
       color: "white",
-      paddingHorizontal: 12,
-      paddingVertical: 6,
-      borderRadius: 8,
-      fontSize: 16,
+      paddingHorizontal: 18,
+      paddingVertical: 10,
+      borderRadius: 10,
+      fontSize: 24,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+    },
+    cameraTextSecondary: {
+      backgroundColor: "rgba(0,0,0,0.45)",
+      color: "#F1F5FF",
+      paddingHorizontal: 16,
+      paddingVertical: 8,
+      borderRadius: 10,
+      fontSize: 20,
+      fontWeight: '600',
     },
     dominantRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 },
     dominantEmoji: { fontSize: 26 },
@@ -503,39 +544,6 @@ export default function App() {
 
     summary: { color: '#BFD0FF', marginTop: 10, fontSize: 12 },
 
-    footer: { padding: 20, gap: 10 },
-    talkBtn: {
-      backgroundColor: '#3461FF',
-      paddingVertical: 18,
-      borderRadius: 999,
-      alignItems: 'center',
-    },
-    talkLabel: { color: 'white', fontSize: 18, fontWeight: '700' },
-
-    identifyBtn: {
-      backgroundColor: '#1B2640',
-      borderRadius: 999,
-      paddingVertical: 16,
-      alignItems: 'center',
-      borderWidth: 1,
-      borderColor: '#24345C',
-    },
-    identifyLabel: {
-      color: '#E3EBFF',
-      fontSize: 16,
-      fontWeight: '600',
-    },
-    secondaryBtn: {
-      borderRadius: 999,
-      paddingVertical: 16,
-      alignItems: 'center',
-      borderWidth: 1,
-      borderColor: '#2F3E66',
-    },
-    secondaryLabel: {
-      color: '#8CA3D6',
-      fontSize: 15,
-      fontWeight: '600',
-    },
+    footerSpacer: { height: 12 },
     hint: { color: '#B7C1D9', textAlign: 'center' },
   });
